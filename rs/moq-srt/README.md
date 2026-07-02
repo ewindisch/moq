@@ -99,16 +99,20 @@ bring your own auth by driving `Server` / `Request` directly, mirroring
 let mut server = moq_srt::Server::bind("0.0.0.0:9000".parse()?, None).await?;
 while let Some(request) = server.accept().await {
     // Inspect `request.resource()` / `request.stream_id()` (treat the stream id
-    // as a token if you like), verify it, and pick the broadcast path.
+    // as a token if you like), verify it, and pick the broadcast path. `accept`
+    // borrows the origin for the whole connection, so clone it into each task.
     match request {
         moq_srt::Request::Publish(publish) => {
-            tokio::spawn(publish.accept(&origin, "live/cam0"));
+            let origin = origin.clone();
+            tokio::spawn(async move { publish.accept(&origin, "live/cam0").await });
         }
         moq_srt::Request::Subscribe(subscribe) => {
-            tokio::spawn(subscribe.accept(&consumer, "live/cam0"));
+            let consumer = consumer.clone();
+            tokio::spawn(async move { subscribe.accept(&consumer, "live/cam0").await });
         }
     }
-    // ...or `request`'s `reject()` to deny it.
+    // ...or call the arm's `reject()` (`Publish::reject` / `Subscribe::reject`)
+    // instead of `accept` to deny it.
 }
 ```
 

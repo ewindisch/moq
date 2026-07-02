@@ -36,9 +36,22 @@ use crate::Result;
 /// recovery. Override per-server with [`Server::bind`]'s `latency` argument.
 pub(crate) const DEFAULT_LATENCY: Duration = Duration::from_millis(200);
 
+/// Default egress mux buffering budget: how long the TS re-muxer waits for a
+/// per-track group to fill before emitting it, so routine delivery jitter at a
+/// group boundary doesn't truncate the current GoP mid-stream. Override with
+/// [`Server::with_egress_buffer`].
+pub(crate) const DEFAULT_EGRESS_BUFFER: Duration = Duration::from_millis(200);
+
 /// SRT payload size for egress: 7 MPEG-TS packets (7 x 188), the de-facto
 /// standard for TS-over-SRT and a clean fit under the typical SRT MTU.
 const SRT_PAYLOAD: usize = 7 * 188;
+
+/// A frame whose media timestamp trails the pacing anchor by less than this is
+/// treated as decode-order reordering (a B-frame) and paced at its own earlier
+/// instant; a larger backlog is a stream discontinuity (a publisher seek/FLUSH or
+/// source switch) that re-anchors the live edge. Comfortably beyond any real
+/// reorder depth, so ordinary B-pyramids never trip the reset.
+const MAX_REORDER: Duration = Duration::from_secs(2);
 
 /// An SRT server that yields each incoming connection's pending request as a
 /// [`Request`].
@@ -50,6 +63,8 @@ pub struct Server {
 	/// Held to keep the listener (and its UDP socket) alive for the server's lifetime.
 	_listener: SrtListener,
 	incoming: SrtIncoming,
+	/// Egress mux buffering budget stamped onto every [`Subscribe`] this server yields.
+	egress_buffer: Duration,
 }
 
 impl Server {
@@ -63,7 +78,17 @@ impl Server {
 		Ok(Self {
 			_listener: listener,
 			incoming,
+			egress_buffer: DEFAULT_EGRESS_BUFFER,
 		})
+	}
+
+	/// Set the egress mux buffering budget applied when serving `m=request`
+	/// callers: how long the TS re-muxer holds a per-track group to absorb
+	/// delivery jitter before emitting it. Larger trades egress latency for fewer
+	/// truncated GoPs; `Duration::ZERO` disables buffering. Defaults to 200ms.
+	pub fn with_egress_buffer(mut self, buffer: Duration) -> Self {
+		self.egress_buffer = buffer;
+		self
 	}
 
 	/// Wait for the next connection that wants to publish or subscribe.
@@ -87,6 +112,7 @@ impl Server {
 				resource,
 				stream_id,
 				peer,
+				egress_buffer: self.egress_buffer,
 			};
 
 			// `m=request` reads a broadcast out; everything else publishes one in.
@@ -111,6 +137,9 @@ struct Pending {
 	/// fields out of it (e.g. a token in `u=` or a custom key).
 	stream_id: Option<String>,
 	peer: SocketAddr,
+	/// Server-wide egress mux buffering budget, applied when this request is a
+	/// [`Subscribe`] (ignored for a [`Publish`]).
+	egress_buffer: Duration,
 }
 
 /// What an accepted SRT connection wants: to contribute media ([`Publish`]) or to
@@ -243,7 +272,7 @@ impl Subscribe {
 	pub async fn accept(self, origin: &OriginConsumer, path: &str) -> Result<()> {
 		let socket = self.0.request.accept(None).await?;
 		tracing::info!(peer = %self.0.peer, %path, "SRT subscribe accepted");
-		serve_subscribe(origin, path, socket).await
+		serve_subscribe(origin, path, socket, self.0.egress_buffer).await
 	}
 
 	/// Reject the subscribe, sending the client a `Forbidden` rejection.
@@ -282,18 +311,25 @@ async fn serve_publish(origin: &OriginProducer, path: &str, mut socket: SrtSocke
 /// Waits for the broadcast to be announced (so a caller may connect before the
 /// publisher), then packs the muxer's output into [`SRT_PAYLOAD`]-sized SRT
 /// messages. Returns once the broadcast ends or the caller disconnects.
-async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSocket) -> Result<()> {
+async fn serve_subscribe(origin: &OriginConsumer, path: &str, socket: SrtSocket, buffer: Duration) -> Result<()> {
+	use futures::StreamExt;
+
+	// Split so we can watch inbound (disconnect) and drive outbound (send) independently:
+	// both the announce wait and the send loop race the read half against liveness, so a
+	// caller who hangs up while the broadcast is unpublished *or* stalled can't leak us.
+	let (mut sink, mut stream) = socket.split();
+
 	// Resolve the broadcast, but watch the socket while we wait: `announced_broadcast`
 	// parks forever for a stream that is never published, and nothing else polls the
 	// socket during that wait, so without this a caller who requests a non-existent
 	// stream (or hangs up before it starts) would leak this task and its socket.
 	let subscriber = tokio::select! {
 		biased;
-		_ = wait_closed(&mut socket) => {
+		_ = wait_closed(&mut stream) => {
 			tracing::debug!(%path, "SRT subscribe closed before its broadcast was available");
 			return Ok(());
 		}
-		subscriber = crate::ts::Subscriber::new(origin, path) => subscriber?,
+		subscriber = crate::ts::Subscriber::new(origin, path, buffer) => subscriber?,
 	};
 
 	let Some(mut subscriber) = subscriber else {
@@ -315,8 +351,22 @@ async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSoc
 	let mut anchor = Instant::now();
 	let mut base = None;
 	let mut send_at = anchor;
-	let mut buffer = bytes::BytesMut::new();
-	while let Some(frame) = subscriber.next().await? {
+	let mut pending = bytes::BytesMut::new();
+	loop {
+		// Race the broadcast read against the caller hanging up: a stalled broadcast (a
+		// producer that stops emitting frames without ending) parks `next` forever, and
+		// without watching the read half a viewer who has already disconnected would leak
+		// this task and its socket until the producer resumes.
+		let frame = tokio::select! {
+			biased;
+			_ = wait_closed(&mut stream) => {
+				tracing::debug!(%path, "SRT subscriber disconnected");
+				return Ok(());
+			}
+			frame = subscriber.next() => frame?,
+		};
+		let Some(frame) = frame else { break };
+
 		// The media zero-point the rest pace against; `pace` re-anchors it forward to
 		// the live edge whenever the media outruns wall-clock.
 		let zero = *base.get_or_insert(frame.timestamp);
@@ -325,16 +375,16 @@ async fn serve_subscribe(origin: &OriginConsumer, path: &str, mut socket: SrtSoc
 		anchor = paced.anchor;
 		base = Some(paced.base);
 
-		buffer.extend_from_slice(&frame.payload);
-		while buffer.len() >= SRT_PAYLOAD {
-			socket.send((send_at, buffer.split_to(SRT_PAYLOAD).freeze())).await?;
+		pending.extend_from_slice(&frame.payload);
+		while pending.len() >= SRT_PAYLOAD {
+			sink.send((send_at, pending.split_to(SRT_PAYLOAD).freeze())).await?;
 		}
 	}
 
-	if !buffer.is_empty() {
-		socket.send((send_at, buffer.freeze())).await?;
+	if !pending.is_empty() {
+		sink.send((send_at, pending.freeze())).await?;
 	}
-	socket.close().await?;
+	sink.close().await?;
 
 	Ok(())
 }
@@ -360,26 +410,43 @@ struct Paced {
 /// the sender past the receiver's TSBPD latency window and playback stalls after
 /// ~one packet.
 ///
-/// Re-anchoring only ever moves the anchor *forward*, so a frame that merely arrives
-/// late -- network/CPU jitter, or a reordered B-frame whose PTS trails the edge --
-/// keeps its earlier media instant instead of collapsing to its arrival instant, and
-/// TSBPD still smooths the jitter into even playout. The cap is "never lead `now`":
-/// the receiver owns the jitter buffer (the SRT latency parameter), so the sender
-/// adds no lookahead of its own (a deliberate lead would just be `now + lead` here).
+/// Re-anchoring moves the anchor forward when media outruns wall-clock, so a frame that
+/// merely arrives late -- network/CPU jitter, or a reordered B-frame whose PTS trails the
+/// edge -- keeps its earlier media instant instead of collapsing to its arrival instant,
+/// and TSBPD still smooths the jitter into even playout. The cap is "never lead `now`":
+/// the receiver owns the jitter buffer (the SRT latency parameter), so the sender adds no
+/// lookahead of its own (a deliberate lead would just be `now + lead` here).
+///
+/// A *large* backward jump is the other re-anchor trigger. A publisher seek/FLUSH (or a
+/// source switch) restarts media timestamps well behind `base`; without a reset `base`
+/// stays pinned at the stale pre-jump high-water mark forever, so every later frame prices
+/// far in the past, collapses onto one instant, and TSBPD can no longer reconstruct
+/// spacing (permanent degradation). Treat a backlog past [`MAX_REORDER`] as a
+/// discontinuity and re-anchor this frame to the live edge, the same as a forward jump.
 fn pace(anchor: Instant, base: moq_net::Timestamp, ts: moq_net::Timestamp, now: Instant) -> Paced {
+	// This frame becomes the live edge: used for both discontinuity directions.
+	let reanchor = Paced {
+		send_at: now,
+		anchor: now,
+		base: ts,
+	};
+
 	let send_at = match ts.checked_sub(base) {
 		Ok(offset) => anchor + Duration::from(offset),
-		// A reordered B-frame can carry a PTS before the anchor: pace it at that earlier
-		// instant instead of collapsing it onto the anchor.
-		Err(_) => anchor.checked_sub(Duration::from(base - ts)).unwrap_or(anchor),
+		Err(_) => {
+			let backlog = Duration::from(base - ts);
+			if backlog > MAX_REORDER {
+				// Discontinuity, not decode-order reordering: reset rather than pin `base`.
+				return reanchor;
+			}
+			// A reordered B-frame can carry a PTS before the anchor: pace it at that earlier
+			// instant instead of collapsing it onto the anchor.
+			anchor.checked_sub(backlog).unwrap_or(anchor)
+		}
 	};
 	if send_at > now {
 		// Media outran wall-clock: re-anchor so this newest frame is the live edge.
-		Paced {
-			send_at: now,
-			anchor: now,
-			base: ts,
-		}
+		reanchor
 	} else {
 		Paced { send_at, anchor, base }
 	}
@@ -387,10 +454,15 @@ fn pace(anchor: Instant, base: moq_net::Timestamp, ts: moq_net::Timestamp, now: 
 
 /// Resolve once the SRT caller hangs up (a clean close or an error), draining and
 /// ignoring any unexpected inbound packets. A subscribe caller normally sends
-/// nothing, so this is purely a disconnect signal to race against the announce wait.
-async fn wait_closed(socket: &mut SrtSocket) {
+/// nothing, so this is purely a disconnect signal to race the outbound path (and
+/// the announce wait) against. Generic over the read half so it drives either a
+/// whole [`SrtSocket`] or a split stream.
+async fn wait_closed<S>(stream: &mut S)
+where
+	S: futures::TryStream + Unpin,
+{
 	use futures::TryStreamExt;
-	while let Ok(Some(_)) = socket.try_next().await {}
+	while let Ok(Some(_)) = stream.try_next().await {}
 }
 
 /// Parse an SRT stream id into its resource name and connection mode.
@@ -484,6 +556,38 @@ mod tests {
 			"a reordered frame can pace before the anchor"
 		);
 		assert_eq!(reordered.anchor, edge.anchor, "no re-anchor when media trails the edge");
+	}
+
+	#[test]
+	fn pace_re_anchors_on_backward_discontinuity() {
+		use moq_net::Timestamp;
+		use std::time::{Duration, Instant};
+		let ms = |m: u64| Timestamp::from_micros(m * 1_000).unwrap();
+
+		// Anchor sitting at the live edge (10s of media). A publisher seek/FLUSH restarts
+		// timestamps far behind it (500ms). That backlog is way past MAX_REORDER, so it's a
+		// discontinuity, not a reordered B-frame: re-anchor this frame to `now` and adopt its
+		// timestamp as the new base, rather than pin `base` at 10s and price everything after
+		// it in the distant past (which would collapse spacing and defeat TSBPD).
+		let anchor = Instant::now();
+		let now = anchor + Duration::from_millis(5);
+		let jumped = pace(anchor, ms(10_000), ms(500), now);
+		assert_eq!(jumped.send_at, now, "a large backward jump paces to now");
+		assert_eq!(jumped.anchor, now);
+		assert_eq!(
+			jumped.base.as_micros(),
+			ms(500).as_micros(),
+			"base resets to the new edge"
+		);
+
+		// A backward step within MAX_REORDER is still ordinary reordering and must NOT reset.
+		let reordered = pace(anchor, ms(10_000), ms(9_500), anchor + Duration::from_millis(5));
+		assert_eq!(
+			reordered.send_at,
+			anchor - Duration::from_millis(500),
+			"a small backward step keeps its earlier media instant"
+		);
+		assert_eq!(reordered.base.as_micros(), ms(10_000).as_micros(), "base is unchanged");
 	}
 
 	fn sid(s: &str) -> StreamId {

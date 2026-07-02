@@ -54,6 +54,12 @@ pub struct Config {
 	/// SRT receive latency: the negotiated buffer that trades delay for loss
 	/// recovery.
 	pub latency: Duration,
+
+	/// Egress mux buffering budget: how long the TS re-muxer holds a per-track
+	/// group before emitting it, absorbing delivery jitter at group boundaries so
+	/// a slightly-late next group doesn't truncate the current one mid-GoP.
+	/// `Duration::ZERO` disables buffering.
+	pub egress_buffer: Duration,
 }
 
 impl Default for Config {
@@ -62,6 +68,7 @@ impl Default for Config {
 			listen: None,
 			prefix: String::new(),
 			latency: crate::server::DEFAULT_LATENCY,
+			egress_buffer: crate::server::DEFAULT_EGRESS_BUFFER,
 		}
 	}
 }
@@ -86,7 +93,9 @@ pub async fn run(origin: OriginProducer, config: Config) -> Result<()> {
 		unreachable!("pending future never resolves");
 	};
 
-	let mut server = Server::bind(listen, config.latency).await?;
+	let mut server = Server::bind(listen, config.latency)
+		.await?
+		.with_egress_buffer(config.egress_buffer);
 	tracing::info!(%listen, prefix = %config.prefix, "SRT listening");
 
 	// Read side of the origin, used to serve `m=request` callers their broadcast.

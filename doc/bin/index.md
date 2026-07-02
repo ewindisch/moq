@@ -46,6 +46,12 @@ An RTMP / enhanced-RTMP -> MoQ ingest gateway. Accepts RTMP from any encoder
 (OBS, ffmpeg) and publishes it into MoQ, supporting H.264/HEVC/AV1/VP9 and
 AAC/Opus/AC-3.
 
+## [moq-srt](/bin/srt)
+
+An SRT / MPEG-TS <-> MoQ gateway, both directions. Ingests `m=publish`
+connections into MoQ and serves `m=request` connections back out as MPEG-TS, so
+ffmpeg and VLC can publish and play. Pure Rust, no libsrt or ffmpeg.
+
 ## [OBS Plugin](/bin/obs)
 
 Real-time latency with the familiar OBS interface.

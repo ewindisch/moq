@@ -83,6 +83,12 @@ struct SrtArgs {
 	/// SRT receive latency: the negotiated buffer that trades delay for loss recovery.
 	#[arg(long = "srt-latency", env = "MOQ_SRT_LATENCY", default_value = "200ms", value_parser = humantime::parse_duration)]
 	latency: Duration,
+
+	/// Egress mux buffering budget: how long the TS re-muxer holds a per-track group before
+	/// emitting it, so delivery jitter at a group boundary doesn't truncate the GoP. `0`
+	/// disables buffering.
+	#[arg(long = "srt-egress-buffer", env = "MOQ_SRT_EGRESS_BUFFER", default_value = "200ms", value_parser = humantime::parse_duration)]
+	egress_buffer: Duration,
 }
 
 impl From<SrtArgs> for moq_srt::Config {
@@ -91,6 +97,7 @@ impl From<SrtArgs> for moq_srt::Config {
 		config.listen = Some(args.listen);
 		config.prefix = args.prefix;
 		config.latency = args.latency;
+		config.egress_buffer = args.egress_buffer;
 		config
 	}
 }
