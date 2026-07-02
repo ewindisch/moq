@@ -15,31 +15,10 @@ use crate::Result;
 const DEFAULT_VIDEO_BITRATE: u64 = 2_000_000;
 const DEFAULT_AUDIO_BITRATE: u64 = 128_000;
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
 	Video,
 	Audio,
-}
-
-impl Kind {
-	/// URL path segment naming this axis (`video` / `audio`). Rendition routes are
-	/// keyed on it so a video and an audio rendition that happen to share a name
-	/// don't collide (they live at `/{broadcast}/video/{name}` vs `.../audio/{name}`).
-	pub(crate) fn as_path(self) -> &'static str {
-		match self {
-			Kind::Video => "video",
-			Kind::Audio => "audio",
-		}
-	}
-
-	/// Parse the axis back from a URL path segment.
-	pub(crate) fn from_path(segment: &str) -> Option<Self> {
-		match segment {
-			"video" => Some(Kind::Video),
-			"audio" => Some(Kind::Audio),
-			_ => None,
-		}
-	}
 }
 
 /// A single HLS rendition: its display metadata for the master playlist plus the
@@ -52,7 +31,7 @@ pub struct Rendition {
 	pub height: Option<u32>,
 	/// RFC 6381 codec string for the master playlist `CODECS` attribute.
 	pub codec: String,
-	pub(crate) store: Arc<SegmentStore>,
+	pub store: Arc<SegmentStore>,
 	/// Aborts the background exporter pump when the rendition is dropped, so a
 	/// pump doesn't outlive the [`Broadcaster`](super::Broadcaster) (and the
 	/// server) that owns it.

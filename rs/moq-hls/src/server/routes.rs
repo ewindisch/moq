@@ -10,7 +10,6 @@ use axum::routing::get;
 use bytes::Bytes;
 
 use super::Server;
-use crate::export::Kind;
 use crate::export::store::SegmentStore;
 
 const M3U8: &str = "application/vnd.apple.mpegurl";
@@ -35,10 +34,10 @@ const BLOCK_TIMEOUT: Duration = Duration::from_secs(10);
 pub fn router(server: Server) -> Router {
 	Router::new()
 		.route("/{broadcast}/master.m3u8", get(master))
-		.route("/{broadcast}/{kind}/{rendition}/media.m3u8", get(media))
-		.route("/{broadcast}/{kind}/{rendition}/init.mp4", get(init))
-		.route("/{broadcast}/{kind}/{rendition}/seg/{file}", get(segment))
-		.route("/{broadcast}/{kind}/{rendition}/part/{seq}/{file}", get(part))
+		.route("/{broadcast}/{rendition}/media.m3u8", get(media))
+		.route("/{broadcast}/{rendition}/init.mp4", get(init))
+		.route("/{broadcast}/{rendition}/seg/{file}", get(segment))
+		.route("/{broadcast}/{rendition}/part/{seq}/{file}", get(part))
 		.with_state(server)
 }
 
@@ -52,13 +51,10 @@ async fn master(State(server): State<Server>, Path(broadcast): Path<String>) -> 
 
 async fn media(
 	State(server): State<Server>,
-	Path((broadcast, kind, rendition)): Path<(String, String, String)>,
+	Path((broadcast, rendition)): Path<(String, String)>,
 	RawQuery(query): RawQuery,
 ) -> Response {
-	let Some(kind) = Kind::from_path(&kind) else {
-		return not_found();
-	};
-	let Some(store) = store(&server, &broadcast, kind, &rendition).await else {
+	let Some(store) = store(&server, &broadcast, &rendition).await else {
 		return not_found();
 	};
 
@@ -78,14 +74,8 @@ async fn media(
 	m3u8(crate::export::render_media(&store.snapshot()))
 }
 
-async fn init(
-	State(server): State<Server>,
-	Path((broadcast, kind, rendition)): Path<(String, String, String)>,
-) -> Response {
-	let Some(kind) = Kind::from_path(&kind) else {
-		return not_found();
-	};
-	let Some(store) = store(&server, &broadcast, kind, &rendition).await else {
+async fn init(State(server): State<Server>, Path((broadcast, rendition)): Path<(String, String)>) -> Response {
+	let Some(store) = store(&server, &broadcast, &rendition).await else {
 		return not_found();
 	};
 	match store.init() {
@@ -96,15 +86,12 @@ async fn init(
 
 async fn segment(
 	State(server): State<Server>,
-	Path((broadcast, kind, rendition, file)): Path<(String, String, String, String)>,
+	Path((broadcast, rendition, file)): Path<(String, String, String)>,
 ) -> Response {
-	let Some(kind) = Kind::from_path(&kind) else {
-		return not_found();
-	};
 	let Some(sequence) = strip_m4s(&file).and_then(|s| s.parse::<u64>().ok()) else {
 		return not_found();
 	};
-	let Some(store) = store(&server, &broadcast, kind, &rendition).await else {
+	let Some(store) = store(&server, &broadcast, &rendition).await else {
 		return not_found();
 	};
 	match store.segment(sequence) {
@@ -115,15 +102,12 @@ async fn segment(
 
 async fn part(
 	State(server): State<Server>,
-	Path((broadcast, kind, rendition, sequence, file)): Path<(String, String, String, u64, String)>,
+	Path((broadcast, rendition, sequence, file)): Path<(String, String, u64, String)>,
 ) -> Response {
-	let Some(kind) = Kind::from_path(&kind) else {
-		return not_found();
-	};
 	let Some(index) = strip_m4s(&file).and_then(|s| s.parse::<usize>().ok()) else {
 		return not_found();
 	};
-	let Some(store) = store(&server, &broadcast, kind, &rendition).await else {
+	let Some(store) = store(&server, &broadcast, &rendition).await else {
 		return not_found();
 	};
 
@@ -137,10 +121,10 @@ async fn part(
 }
 
 /// Resolve a rendition's store, waiting for the catalog to populate.
-async fn store(server: &Server, broadcast: &str, kind: Kind, rendition: &str) -> Option<std::sync::Arc<SegmentStore>> {
+async fn store(server: &Server, broadcast: &str, rendition: &str) -> Option<std::sync::Arc<SegmentStore>> {
 	let broadcaster = server.broadcaster(broadcast).await?;
 	broadcaster.wait_ready(READY_TIMEOUT).await;
-	broadcaster.rendition(kind, rendition).map(|r| r.store.clone())
+	broadcaster.rendition(rendition).map(|r| r.store.clone())
 }
 
 /// Block until the store holds `(msn, part)`, the window passed it, or the track

@@ -9,7 +9,7 @@
 mod master;
 mod playlist;
 mod rendition;
-pub(crate) mod store;
+pub mod store;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
@@ -19,15 +19,11 @@ use moq_mux::catalog::hang::Catalog;
 use moq_mux::catalog::{self, CatalogFormat, Stream};
 use tokio::sync::watch;
 
-pub(crate) use playlist::render_media;
+pub use playlist::render_media;
 pub use rendition::{Kind, Rendition};
 
 /// Export tuning shared across renditions.
-///
-/// Construct via [`Config::default`] and set the fields you need, so new options
-/// stay additive.
 #[derive(Clone, Debug)]
-#[non_exhaustive]
 pub struct Config {
 	/// LL-HLS part target duration (also the exporter's fragment cap).
 	pub part_target: Duration,
@@ -52,10 +48,9 @@ impl Default for Config {
 	}
 }
 
-/// All renditions of one broadcast, kept in sync with its catalog. Keyed by
-/// `(kind, name)` so a video and an audio rendition sharing a name don't collide.
+/// All renditions of one broadcast, kept in sync with its catalog.
 pub struct Broadcaster {
-	renditions: Mutex<BTreeMap<(Kind, String), Arc<Rendition>>>,
+	renditions: Mutex<BTreeMap<String, Arc<Rendition>>>,
 	/// Current rendition count, bumped on every catalog sync so handlers can wait
 	/// for the catalog to populate before rendering a playlist.
 	ready: watch::Sender<usize>,
@@ -100,9 +95,9 @@ impl Broadcaster {
 		*self.paused.borrow()
 	}
 
-	/// Look up a rendition by axis and name.
-	pub fn rendition(&self, kind: Kind, name: &str) -> Option<Arc<Rendition>> {
-		self.renditions.lock().unwrap().get(&(kind, name.to_string())).cloned()
+	/// Look up a rendition by name.
+	pub fn rendition(&self, name: &str) -> Option<Arc<Rendition>> {
+		self.renditions.lock().unwrap().get(name).cloned()
 	}
 
 	/// Wait until at least one rendition has been discovered, or `timeout` elapses.
@@ -150,7 +145,7 @@ impl Broadcaster {
 	fn sync(&self, broadcast: &moq_net::BroadcastConsumer, config: &Config, catalog: &Catalog) {
 		let mut renditions = self.renditions.lock().unwrap();
 		for (name, video) in &catalog.video.renditions {
-			renditions.entry((Kind::Video, name.clone())).or_insert_with(|| {
+			renditions.entry(name.clone()).or_insert_with(|| {
 				Arc::new(Rendition::video(
 					name.clone(),
 					video,
@@ -161,7 +156,7 @@ impl Broadcaster {
 			});
 		}
 		for (name, audio) in &catalog.audio.renditions {
-			renditions.entry((Kind::Audio, name.clone())).or_insert_with(|| {
+			renditions.entry(name.clone()).or_insert_with(|| {
 				Arc::new(Rendition::audio(
 					name.clone(),
 					audio,

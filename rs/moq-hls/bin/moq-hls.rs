@@ -101,9 +101,11 @@ async fn main() -> anyhow::Result<()> {
 			let subscriber_consumer = subscriber.consume();
 			let reconnect = client.with_subscriber(subscriber).reconnect(relay.clone());
 
-			let mut config = moq_hls::export::Config::default();
-			config.part_target = part_target;
-			config.window = window;
+			let config = moq_hls::export::Config {
+				part_target,
+				window,
+				..Default::default()
+			};
 			let server = Server::new(subscriber_consumer, config);
 			let app = server
 				.router()
