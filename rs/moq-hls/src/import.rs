@@ -23,19 +23,19 @@ use url::Url;
 use crate::{Error, Result};
 
 /// Configuration for the single-rendition HLS import loop.
+///
+/// Construct via [`Config::new`] and set the fields you need, so new options
+/// stay additive.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct Config {
 	/// The master or media playlist URL or file path to import.
 	pub playlist: String,
-
-	/// An optional HTTP client to use for fetching the playlist and segments.
-	/// If not provided, a default client will be created.
-	pub client: Option<Client>,
 }
 
 impl Config {
 	pub fn new(playlist: String) -> Self {
-		Self { playlist, client: None }
+		Self { playlist }
 	}
 
 	/// Parse the playlist string into a URL.
@@ -117,12 +117,9 @@ impl Import {
 	/// Create a new HLS import that will write into the given broadcast.
 	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: CatalogProducer, cfg: Config) -> Result<Self> {
 		let base_url = cfg.parse_playlist()?;
-		let client = cfg.client.unwrap_or_else(|| {
-			Client::builder()
-				.user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
-				.build()
-				.unwrap()
-		});
+		let client = Client::builder()
+			.user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
+			.build()?;
 		Ok(Self {
 			broadcast,
 			catalog,

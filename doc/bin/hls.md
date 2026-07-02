@@ -26,14 +26,16 @@ emits CMAF fragments; with a part target set, each GOP is split into LL-HLS
 *parts*, and a new keyframe (independent fragment) starts a new *segment*. A
 bounded sliding window of segments/parts per rendition backs the playlists.
 
-One server is path-based, so it can expose many broadcasts at once:
+One server is path-based, so it can expose many broadcasts at once. The
+`{kind}` segment is `video` or `audio`, so a video and audio rendition that
+share a name don't collide:
 
 ```text
 GET /{broadcast}/master.m3u8
-GET /{broadcast}/{rendition}/media.m3u8   # LL-HLS blocking reload via ?_HLS_msn=&_HLS_part=
-GET /{broadcast}/{rendition}/init.mp4
-GET /{broadcast}/{rendition}/seg/{seq}.m4s
-GET /{broadcast}/{rendition}/part/{seq}/{idx}.m4s
+GET /{broadcast}/{kind}/{rendition}/media.m3u8   # LL-HLS blocking reload via ?_HLS_msn=&_HLS_part=
+GET /{broadcast}/{kind}/{rendition}/init.mp4
+GET /{broadcast}/{kind}/{rendition}/seg/{seq}.m4s
+GET /{broadcast}/{kind}/{rendition}/part/{seq}/{idx}.m4s
 ```
 
 The media playlist advertises `EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES`,

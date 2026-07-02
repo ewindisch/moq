@@ -15,10 +15,31 @@ use crate::Result;
 const DEFAULT_VIDEO_BITRATE: u64 = 2_000_000;
 const DEFAULT_AUDIO_BITRATE: u64 = 128_000;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Kind {
 	Video,
 	Audio,
+}
+
+impl Kind {
+	/// URL path segment naming this axis (`video` / `audio`). Rendition routes are
+	/// keyed on it so a video and an audio rendition that happen to share a name
+	/// don't collide (they live at `/{broadcast}/video/{name}` vs `.../audio/{name}`).
+	pub(crate) fn as_path(self) -> &'static str {
+		match self {
+			Kind::Video => "video",
+			Kind::Audio => "audio",
+		}
+	}
+
+	/// Parse the axis back from a URL path segment.
+	pub(crate) fn from_path(segment: &str) -> Option<Self> {
+		match segment {
+			"video" => Some(Kind::Video),
+			"audio" => Some(Kind::Audio),
+			_ => None,
+		}
+	}
 }
 
 /// A single HLS rendition: its display metadata for the master playlist plus the
@@ -31,24 +52,29 @@ pub struct Rendition {
 	pub height: Option<u32>,
 	/// RFC 6381 codec string for the master playlist `CODECS` attribute.
 	pub codec: String,
-	pub store: Arc<SegmentStore>,
+	pub(crate) store: Arc<SegmentStore>,
+	/// Aborts the background exporter pump when the rendition is dropped, so a
+	/// pump doesn't outlive the [`Broadcaster`](super::Broadcaster) (and the
+	/// server) that owns it.
+	pump: tokio::task::AbortHandle,
+}
+
+impl Drop for Rendition {
+	fn drop(&mut self) {
+		self.pump.abort();
+	}
 }
 
 impl Rendition {
-	pub fn video(
+	pub(crate) fn video(
 		name: String,
 		config: &VideoConfig,
 		broadcast: moq_net::BroadcastConsumer,
 		cfg: &Config,
 		paused: watch::Receiver<bool>,
 	) -> Self {
-		let store = Arc::new(SegmentStore::new(
-			true,
-			cfg.part_target.as_secs_f64(),
-			cfg.audio_segment_target.as_secs_f64(),
-			cfg.window.as_secs_f64(),
-		));
-		spawn_pump(broadcast, name.clone(), Kind::Video, store.clone(), cfg.clone(), paused);
+		let store = Arc::new(SegmentStore::new(true, cfg));
+		let pump = spawn_pump(broadcast, name.clone(), Kind::Video, store.clone(), cfg.clone(), paused);
 		Self {
 			name,
 			kind: Kind::Video,
@@ -57,23 +83,19 @@ impl Rendition {
 			height: config.coded_height,
 			codec: config.codec.to_string(),
 			store,
+			pump,
 		}
 	}
 
-	pub fn audio(
+	pub(crate) fn audio(
 		name: String,
 		config: &AudioConfig,
 		broadcast: moq_net::BroadcastConsumer,
 		cfg: &Config,
 		paused: watch::Receiver<bool>,
 	) -> Self {
-		let store = Arc::new(SegmentStore::new(
-			false,
-			cfg.part_target.as_secs_f64(),
-			cfg.audio_segment_target.as_secs_f64(),
-			cfg.window.as_secs_f64(),
-		));
-		spawn_pump(broadcast, name.clone(), Kind::Audio, store.clone(), cfg.clone(), paused);
+		let store = Arc::new(SegmentStore::new(false, cfg));
+		let pump = spawn_pump(broadcast, name.clone(), Kind::Audio, store.clone(), cfg.clone(), paused);
 		Self {
 			name,
 			kind: Kind::Audio,
@@ -82,6 +104,7 @@ impl Rendition {
 			height: None,
 			codec: config.codec.to_string(),
 			store,
+			pump,
 		}
 	}
 }
@@ -93,14 +116,15 @@ fn spawn_pump(
 	store: Arc<SegmentStore>,
 	cfg: Config,
 	paused: watch::Receiver<bool>,
-) {
+) -> tokio::task::AbortHandle {
 	tokio::spawn(async move {
 		if let Err(err) = run_pump(broadcast, &name, kind, &store, &cfg, paused).await {
 			tracing::warn!(%name, ?kind, %err, "hls rendition pump ended with error");
 		}
 		// Whatever happened, mark the playlist closed so blocking readers wake.
 		store.finish();
-	});
+	})
+	.abort_handle()
 }
 
 async fn run_pump(

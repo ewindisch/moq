@@ -39,7 +39,11 @@ pub fn render_media(snapshot: &Snapshot) -> String {
 	);
 	let _ = writeln!(out, "#EXT-X-PART-INF:PART-TARGET={:.3}", snapshot.part_target);
 	let _ = writeln!(out, "#EXT-X-MEDIA-SEQUENCE:{}", snapshot.media_sequence);
-	let _ = writeln!(out, "#EXT-X-MAP:URI=\"init.mp4\"");
+	// Only advertise the init segment once it exists; otherwise a player fetches
+	// `init.mp4` and 404s in the window before the first fragment lands.
+	if snapshot.init_ready {
+		let _ = writeln!(out, "#EXT-X-MAP:URI=\"init.mp4\"");
+	}
 
 	for segment in &snapshot.segments {
 		if segment.discontinuity {
@@ -128,6 +132,23 @@ mod tests {
 		// Live edge: preload hint points at the next (not-yet-present) part.
 		assert!(out.contains("#EXT-X-PRELOAD-HINT:TYPE=PART,URI=\"part/11/1.m4s\"\n"));
 		assert!(!out.contains("#EXT-X-ENDLIST"));
+	}
+
+	#[test]
+	fn omits_map_until_init_ready() {
+		let snapshot = Snapshot {
+			init_ready: false,
+			part_target: 0.5,
+			media_sequence: 0,
+			next_sequence: 0,
+			segments: vec![],
+			finished: false,
+		};
+		let out = render_media(&snapshot);
+		assert!(
+			!out.contains("#EXT-X-MAP"),
+			"no init segment advertised before it exists"
+		);
 	}
 
 	#[test]

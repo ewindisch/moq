@@ -2,28 +2,32 @@
 //!
 //! A [`Broadcaster`] watches one broadcast's catalog and, per rendition, runs a
 //! [`moq_mux::container::fmp4::Export`] narrowed to that single track (via
-//! [`moq_mux::catalog::Filter`]) feeding a [`store::SegmentStore`]. The HTTP
+//! [`moq_mux::catalog::Filter`]) feeding a crate-private segment store. The HTTP
 //! [`server`](crate::server) reads the stores to answer playlist and segment
 //! requests.
 
 mod master;
 mod playlist;
 mod rendition;
-pub mod store;
+pub(crate) mod store;
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use moq_mux::catalog::hang::Catalog;
 use moq_mux::catalog::{self, CatalogFormat, Stream};
 use tokio::sync::watch;
 
-pub use playlist::render_media;
+pub(crate) use playlist::render_media;
 pub use rendition::{Kind, Rendition};
 
 /// Export tuning shared across renditions.
+///
+/// Construct via [`Config::default`] and set the fields you need, so new options
+/// stay additive.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Config {
 	/// LL-HLS part target duration (also the exporter's fragment cap).
 	pub part_target: Duration,
@@ -48,9 +52,10 @@ impl Default for Config {
 	}
 }
 
-/// All renditions of one broadcast, kept in sync with its catalog.
+/// All renditions of one broadcast, kept in sync with its catalog. Keyed by
+/// `(kind, name)` so a video and an audio rendition sharing a name don't collide.
 pub struct Broadcaster {
-	renditions: Mutex<BTreeMap<String, Arc<Rendition>>>,
+	renditions: Mutex<BTreeMap<(Kind, String), Arc<Rendition>>>,
 	/// Current rendition count, bumped on every catalog sync so handlers can wait
 	/// for the catalog to populate before rendering a playlist.
 	ready: watch::Sender<usize>,
@@ -70,7 +75,9 @@ impl Broadcaster {
 			ready,
 			paused,
 		});
-		tokio::spawn(watch_catalog(broadcast, config, broadcaster.clone()));
+		// Downgrade so the catalog watcher doesn't keep the broadcaster (and its
+		// rendition pumps) alive after the server drops it.
+		tokio::spawn(watch_catalog(broadcast, config, Arc::downgrade(&broadcaster)));
 		broadcaster
 	}
 
@@ -93,9 +100,9 @@ impl Broadcaster {
 		*self.paused.borrow()
 	}
 
-	/// Look up a rendition by name.
-	pub fn rendition(&self, name: &str) -> Option<Arc<Rendition>> {
-		self.renditions.lock().unwrap().get(name).cloned()
+	/// Look up a rendition by axis and name.
+	pub fn rendition(&self, kind: Kind, name: &str) -> Option<Arc<Rendition>> {
+		self.renditions.lock().unwrap().get(&(kind, name.to_string())).cloned()
 	}
 
 	/// Wait until at least one rendition has been discovered, or `timeout` elapses.
@@ -143,7 +150,7 @@ impl Broadcaster {
 	fn sync(&self, broadcast: &moq_net::BroadcastConsumer, config: &Config, catalog: &Catalog) {
 		let mut renditions = self.renditions.lock().unwrap();
 		for (name, video) in &catalog.video.renditions {
-			renditions.entry(name.clone()).or_insert_with(|| {
+			renditions.entry((Kind::Video, name.clone())).or_insert_with(|| {
 				Arc::new(Rendition::video(
 					name.clone(),
 					video,
@@ -154,7 +161,7 @@ impl Broadcaster {
 			});
 		}
 		for (name, audio) in &catalog.audio.renditions {
-			renditions.entry(name.clone()).or_insert_with(|| {
+			renditions.entry((Kind::Audio, name.clone())).or_insert_with(|| {
 				Arc::new(Rendition::audio(
 					name.clone(),
 					audio,
@@ -168,7 +175,7 @@ impl Broadcaster {
 	}
 }
 
-async fn watch_catalog(broadcast: moq_net::BroadcastConsumer, config: Config, broadcaster: Arc<Broadcaster>) {
+async fn watch_catalog(broadcast: moq_net::BroadcastConsumer, config: Config, broadcaster: Weak<Broadcaster>) {
 	let mut consumer = match catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await {
 		Ok(consumer) => consumer,
 		Err(err) => {
@@ -179,7 +186,14 @@ async fn watch_catalog(broadcast: moq_net::BroadcastConsumer, config: Config, br
 
 	loop {
 		match kio::wait(|waiter| consumer.poll_next(waiter)).await {
-			Ok(Some(catalog)) => broadcaster.sync(&broadcast, &config, &catalog),
+			Ok(Some(catalog)) => {
+				// Stop once the broadcaster is gone, rather than resurrect it and
+				// respawn pumps nobody will read.
+				let Some(broadcaster) = broadcaster.upgrade() else {
+					break;
+				};
+				broadcaster.sync(&broadcast, &config, &catalog);
+			}
 			Ok(None) => break,
 			Err(err) => {
 				tracing::warn!(%err, "broadcast catalog stream ended with error");

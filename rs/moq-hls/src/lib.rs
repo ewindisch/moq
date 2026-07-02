@@ -14,6 +14,9 @@
 //! surface.
 
 mod error;
+// The export pipeline exists only to feed the HTTP server, so it rides the same
+// feature (nothing consumes a `Broadcaster`'s stores without the server).
+#[cfg(feature = "server")]
 pub mod export;
 pub mod import;
 #[cfg(feature = "server")]

@@ -98,7 +98,9 @@ pub struct SegmentStore {
 }
 
 impl SegmentStore {
-	pub fn new(is_video: bool, part_target: f64, audio_segment_target: f64, window: f64) -> Self {
+	/// `is_video` selects the segment-rolling policy (GOP boundaries vs. the audio
+	/// duration target); the three window/target durations come from [`Config`](super::Config).
+	pub(crate) fn new(is_video: bool, config: &super::Config) -> Self {
 		let (notify, _) = watch::channel(Version::default());
 		Self {
 			inner: Mutex::new(Inner {
@@ -110,9 +112,9 @@ impl SegmentStore {
 			}),
 			notify,
 			is_video,
-			part_target,
-			audio_segment_target,
-			window,
+			part_target: config.part_target.as_secs_f64(),
+			audio_segment_target: config.audio_segment_target.as_secs_f64(),
+			window: config.window.as_secs_f64(),
 		}
 	}
 
@@ -127,6 +129,18 @@ impl SegmentStore {
 
 		{
 			let mut inner = self.inner.lock().unwrap();
+
+			// A discontinuity segment must open on an independent (keyframe) fragment: the
+			// decoder resets at the segment boundary, so opening one on a mid-GoP P-frame
+			// renders green until the next keyframe. On a short pause the export resumes
+			// mid-group on a P-frame whose media is still contiguous with the pre-pause
+			// segment (nothing was evicted), so there's no real timeline gap: drop the
+			// pending discontinuity and keep appending. A real gap resumes on a fresh group
+			// whose first fragment is a keyframe, which keeps the discontinuity. Audio parts
+			// are always independent, so this only ever affects video.
+			if inner.discontinuity_pending && self.is_video && !fragment.independent {
+				inner.discontinuity_pending = false;
+			}
 
 			// A pending discontinuity forces a fresh segment so the resumed media never
 			// shares a segment with pre-pause media (matters for audio, which otherwise
@@ -313,5 +327,51 @@ impl SegmentStore {
 			segments,
 			finished: inner.finished,
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn video_store() -> SegmentStore {
+		SegmentStore::new(true, &crate::export::Config::default())
+	}
+
+	fn frag(independent: bool) -> Fragment {
+		Fragment {
+			data: Bytes::from_static(b"x"),
+			init: false,
+			independent,
+			duration: 0.1,
+		}
+	}
+
+	#[test]
+	fn short_pause_resume_on_p_frame_stays_contiguous() {
+		let store = video_store();
+		store.push(frag(true)); // seg 0 opens on a keyframe
+		store.mark_discontinuity(); // resume after a short pause
+		store.push(frag(false)); // resumes mid-GoP on a P-frame
+
+		let snap = store.snapshot();
+		// The P-frame appended to seg 0 (contiguous media), no spurious discontinuity
+		// onto a P-frame that would render green.
+		assert_eq!(snap.segments.len(), 1, "no new segment opened on the P-frame");
+		assert!(!snap.segments[0].discontinuity);
+		assert_eq!(snap.segments[0].parts.len(), 2);
+	}
+
+	#[test]
+	fn gap_resume_on_keyframe_marks_discontinuity() {
+		let store = video_store();
+		store.push(frag(true)); // seg 0
+		store.mark_discontinuity(); // resume after a real gap (group evicted)
+		store.push(frag(true)); // resumes on a fresh group's keyframe
+
+		let snap = store.snapshot();
+		assert_eq!(snap.segments.len(), 2);
+		assert!(!snap.segments[0].discontinuity);
+		assert!(snap.segments[1].discontinuity, "keyframe resume opens a discontinuity");
 	}
 }

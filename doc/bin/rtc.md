@@ -106,7 +106,7 @@ ICE disconnect timeout. Embedders that own their own routing can call
 | VP9          | `VideoCodec::VP9` | yes | yes |
 | AV1          | `VideoCodec::AV1` | yes | no |
 
-On egress, `codec::Track` reshapes each rendition into what str0m's Frame
+On egress, the gateway reshapes each rendition into what str0m's Frame
 API expects. Opus / VP8 / VP9 / AV1 and inline-parameter H.264 (avc3) /
 H.265 (hev1) pass through untouched. Out-of-band-parameter H.264 (avc1) and
 H.265 (hvc1) are rewritten from length-prefixed NALU to Annex-B with the

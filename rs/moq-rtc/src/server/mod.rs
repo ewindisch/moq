@@ -27,6 +27,7 @@ use mux::Mux;
 /// to return to the client, plus an opaque resource id for the `Location` header
 /// (the RFC 9725 session resource URL).
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Response {
 	/// Opaque id identifying the negotiated session, for the `Location` header.
 	pub resource_id: String,
@@ -35,7 +36,11 @@ pub struct Response {
 }
 
 /// Configuration shared by both `server publish` and `server subscribe`.
+///
+/// Construct via [`Config::default`] and set the fields you need, so new options
+/// stay additive.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Config {
 	/// Public UDP socket addresses that should be advertised as ICE host
 	/// candidates. Each is sent as a separate `candidate` line in the SDP
