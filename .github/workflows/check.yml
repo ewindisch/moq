@@ -53,3 +53,47 @@ jobs:
 
       # `just ci` calls `just changed` internally to skip unchanged scopes.
       - run: nix develop --command just ci
+
+  swift:
+    name: Swift
+    if: github.event.action != 'closed'
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Detect Swift changes
+        id: swift-changes
+        run: |
+          base="origin/${GITHUB_BASE_REF}"
+          merge_base=$(git merge-base "$base" HEAD) || {
+            echo "error: cannot resolve merge-base against $base (is full history fetched?)" >&2
+            exit 1
+          }
+          files=$(git diff --name-only "$merge_base")
+
+          if [[ -n "$files" ]] && echo "$files" | grep -qE '^(swift/|rs/moq-ffi/|\.github/workflows/check\.yml$)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "swift: no Swift or moq-ffi changes; skipping."
+          fi
+
+      - name: Install Rust
+        if: steps.swift-changes.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Rust Cache
+        if: steps.swift-changes.outputs.run == 'true'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+
+      - name: Swift check
+        if: steps.swift-changes.outputs.run == 'true'
+        run: ./swift/scripts/check.sh
