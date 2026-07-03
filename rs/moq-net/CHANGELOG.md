@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/moq-dev/moq/compare/moq-net-v0.1.13...moq-net-v0.2.0) - 2026-07-03
+
+### Added
+
+- *(moq-net)* hook up the rest of moq-lite-05 wire (TRACK_INFO, SUBSCRIBE_END, frame timestamps) ([#1963](https://github.com/moq-dev/moq/pull/1963))
+- *(moq-net)* moq-lite-05 SETUP message + PATH parameter ([#1954](https://github.com/moq-dev/moq/pull/1954))
+
+### Other
+
+- [codex] Future-proof moq-net metadata structs ([#2046](https://github.com/moq-dev/moq/pull/2046))
+- track announcement byte usage in stats ([#1953](https://github.com/moq-dev/moq/pull/1953))
+
 ## [0.1.13](https://github.com/moq-dev/moq/compare/moq-net-v0.1.12...moq-net-v0.1.13) - 2026-06-30
 
 ### Added
