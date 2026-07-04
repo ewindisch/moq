@@ -27,6 +27,7 @@ check *args:
 # force-run everything. `cargo publish --dry-run` lives in release-rs.yml.
 #
 # `cargo deny` runs here (not in `check`) so the inner-loop stays fast
+
 # and devs aren't blocked by a fresh upstream advisory mid-edit.
 ci FILES="":
     #!/usr/bin/env bash
@@ -101,6 +102,7 @@ update:
 #
 # Examples:
 #   just rs package moq-relay deb
+
 # just rs package moq-cli rpm
 package crate packager:
     #!/usr/bin/env bash
@@ -108,7 +110,7 @@ package crate packager:
     case "{{ crate }}" in
     	moq-relay)      bin=moq-relay  ;;
     	moq-cli)        bin=moq        ;;
-    	moq-token-cli)  bin=moq-token-cli ;;
+        moq-token-cli)  bin=moq-token  ;;
     	*) echo "Unknown crate: {{ crate }} (use moq-relay, moq-cli, or moq-token-cli)" >&2; exit 1 ;;
     esac
     case "{{ packager }}" in
